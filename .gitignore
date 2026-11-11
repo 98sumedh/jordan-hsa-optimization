@@ -85,3 +85,4 @@ generate_figures.py
 _pipeline_runs/
 out_*/
 .DS_Store
+.venv/
