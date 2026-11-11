@@ -209,7 +209,12 @@ def main():
 
     facilities = load_facilities(out_dir, args.network)
     pop_path = str(BASE_DIR / "data" / "jor_ppp_2020_UNadj.tif")
+    
     mode = args.hsa_mode
+    if mode not in PROFILES:
+        print(f"Weight sensitivity is not defined for mode '{mode}' "
+              f"(profiles exist for {sorted(PROFILES)}); skipping.")
+        return
     base_profile = PROFILES[mode]
 
     print(f"Weight sensitivity by re-optimization: {args.network}-{mode} "

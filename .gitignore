@@ -83,3 +83,5 @@ generate_figures.py
 
 # Pipeline runner artifacts — executed notebooks and logs, populated at runtime
 _pipeline_runs/
+out_*/
+.DS_Store

@@ -150,7 +150,7 @@ def run(args):
             raise ValueError(f"{name}: missing columns {sorted(absent)}")
         frame["hsa_key"] = frame.hsa_id.map(key)
         frame = frame.merge(groups[["hsa_key", "group"]], on="hsa_key", how="left", validate="many_to_one")
-        if frame.group.isna().any() or frame.hsa_key.nunique() != 18:
+        if frame.group.isna().any() or frame.hsa_key.nunique() != len(groups):
             raise ValueError(f"{name}: model HSAs did not match all final allocation HSAs")
         if frame[needed].isna().any().any():
             raise ValueError(f"{name}: incomplete model data; refusing imputation")

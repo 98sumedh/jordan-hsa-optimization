@@ -96,10 +96,8 @@ END_DATE = None
 # ============================================================================
 
 def clean_facility_name(name):
-    """Standardize facility names for matching - convert spaces to underscores, strip trailing underscores"""
-    cleaned = name.strip().replace('  ', ' ').replace(' ', '_')
-    # Remove trailing underscores (some climate files have them)
-    return cleaned.rstrip('_')
+    """Standardize facility names for matching: any run of spaces/underscores -> one underscore, trimmed."""
+    return '_'.join(str(name).replace('_', ' ').split())
 
 
 def parse_args():
