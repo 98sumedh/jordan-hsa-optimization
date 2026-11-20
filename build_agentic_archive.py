@@ -5,12 +5,22 @@ build_agentic_archive.py -- package pipeline runs as agentic archives.
 One archive per run (network x hsa_mode x boundary_version x disease). Each archive is
 a zip with manifest.json at its ROOT and the run's curated outputs under out/:
 
-    manifest.json            {"model": {...run identity + paths...}, "meta": {...}}
+    manifest.json            {"HEFTE": {...}, "model": {...}, "meta": {...}}
     SKILL_CONTEXT.md         short how-to-read note for the agent
     out/<NET>_<MODE>_hsas_<ver>.geojson
     out/modeling/...         model results (summary tables only)
     out/sensitivity/...      robustness analyses
     out/textresults/*.md     written summaries
+    HEFTE inputs (full files, exempt from the size cap):
+    out/<NET>_<MODE>_map_<ver>.gpkg
+    out/<NET>_<MODE>_facility_hsa_assignments_<ver>.csv
+    out/modeling/<NET>_<MODE>_modeling_dataset_<ver>.csv         (weekly)
+    out/modeling/<NET>_<MODE>_daily_modeling_dataset_<ver>.csv   (daily)
+    out/data/jordan_islamic_calendar.csv
+    out/data/<NET>_groups_of_diagnoses.csv                       (diagnosis_map)
+    out/data/<NET>_patient_visits.csv                            (diagnoses)
+
+The "HEFTE" and "model" sections follow Steve's manifest spec; "meta" is ours.
 
 Every path in manifest.json is relative to the archive root, so the agent's
 zip_loader resolves files only through the manifest.
@@ -159,6 +169,47 @@ def select_files(run_dir: Path, shared_dir: Path | None, network: str, mode: str
     return picked, missing, skipped
 
 
+def select_hefte(run_dir: Path, shared_dir: Path | None, data_dir: Path, network: str,
+                 mode: str, ver: str) -> dict[str, tuple[str, Path]]:
+    """Return {HEFTE key: (archive_rel_path, source_path)}. All seven are required.
+
+    Per-run files are taken from the run folder, falling back to the shared out/
+    folder (the gpkg maps were only written there). Calendar and diagnosis files
+    come from data/; SYNMOD stand-ins are used for diagnosis_map and diagnoses.
+    These are packed whole, ignoring ALLOWED_EXT and MAX_FILE_KB.
+    """
+    prefix = f"{network}_{mode}"
+    per_run = {
+        "gpkg": f"{prefix}_map_{ver}.gpkg",
+        "hsa_assignments": f"{prefix}_facility_hsa_assignments_{ver}.csv",
+        "weekly": f"modeling/{prefix}_modeling_dataset_{ver}.csv",
+        "daily": f"modeling/{prefix}_daily_modeling_dataset_{ver}.csv",
+    }
+    from_data = {
+        "calendar": "jordan_islamic_calendar.csv",
+        "diagnosis_map": f"{network}_groups_of_diagnoses.csv",
+        "diagnoses": f"{network}_patient_visits.csv",
+    }
+    out: dict[str, tuple[str, Path]] = {}
+    absent: list[str] = []
+    for key, rel in per_run.items():
+        roots = [run_dir] + ([shared_dir] if shared_dir is not None else [])
+        src = next((r / rel for r in roots if (r / rel).is_file()), None)
+        if src is None:
+            absent.append(f"{key}: {rel}")
+        else:
+            out[key] = (f"{ARCHIVE_ROOT}/{rel}", src)
+    for key, name in from_data.items():
+        src = data_dir / name
+        if not src.is_file():
+            absent.append(f"{key}: {src}")
+        else:
+            out[key] = (f"{ARCHIVE_ROOT}/data/{name}", src)
+    if absent:
+        raise PackError(f"{run_dir.name}: HEFTE file(s) missing: {absent}")
+    return out
+
+
 # -------------------------------------------------------------------- building
 def skill_context(bundle_key: str, label: str, network: str, mode: str, ver: str,
                   synthetic: bool) -> str:
@@ -174,13 +225,16 @@ def skill_context(bundle_key: str, label: str, network: str, mode: str, ver: str
         lines += ["**SYNTHETIC DATA** (SYNMOD network): these results validate the pipeline "
                   "machinery and are NOT real epidemiology. Never present them as findings "
                   "about Jordan.", ""]
-    lines += ["Contents: summary tables only (no figures, no train/val/test splits, no raw "
-              f"datasets). Start with `{ARCHIVE_ROOT}/textresults/*.md`, then open the "
-              "CSV/JSON tables.", ""]
+    lines += ["Contents: two sections in `manifest.json`. `model` points to summary "
+              f"tables (no figures, no train/val/test splits); start with "
+              f"`{ARCHIVE_ROOT}/textresults/*.md`, then open the CSV/JSON tables. `HEFTE` "
+              "points to the full input datasets (HSA map, facility assignments, weekly and "
+              "daily modeling datasets, calendar, diagnosis groups, patient visits); these "
+              "can be large, so read them selectively.", ""]
     return "\n".join(lines)
 
 
-def build_one(run_dir: Path, dest: Path, shared_dir: Path | None,
+def build_one(run_dir: Path, dest: Path, shared_dir: Path | None, data_dir: Path,
               disease: str | None) -> tuple[Path, list[str], list[str]]:
     network, mode, ver = parse_run_dir(run_dir)
     keyword = disease or detect_disease(run_dir, network, mode, ver)
@@ -198,9 +252,22 @@ def build_one(run_dir: Path, dest: Path, shared_dir: Path | None,
     if absent:
         raise PackError(f"{run_dir.name}: required file(s) missing: {absent}")
 
+    hefte = select_hefte(run_dir, shared_dir, data_dir, network, mode, ver)
+    for rel, src in hefte.values():
+        files[rel] = src
+
     n_hsas = len(json.loads(files[geo_rel].read_text()).get("features", []))
     rels = sorted(files)
     manifest = {
+        "HEFTE": {
+            "network": network,
+            "hsa_mode": mode,
+            "boundary_version": ver,
+            "disease_focus_input": label,
+            "disease_group": label,
+            "disease_slug": dslug,
+            **{key: rel for key, (rel, _src) in hefte.items()},
+        },
         "model": {
             "network": network,
             "hsa_mode": mode,
@@ -219,7 +286,7 @@ def build_one(run_dir: Path, dest: Path, shared_dir: Path | None,
             "n_hsas": n_hsas,
             "outcome_col": daily_outcome_col(label),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "sections_included": ["model"],
+            "sections_included": ["HEFTE", "model"],
             "file_count": len(rels),
             "files": rels,
         },
@@ -246,12 +313,15 @@ def verify(zpath: Path) -> None:
         if "manifest.json" not in names:
             raise PackError(f"{zpath.name}: manifest.json is not at the root")
         m = json.loads(z.read("manifest.json"))
-    for k, v in m["model"].items():
-        if not (isinstance(v, str) and v.startswith(f"{ARCHIVE_ROOT}/")):
-            continue
-        ok = any(n.startswith(v) for n in names) if v.endswith("/") else v in names
-        if not ok:
-            raise PackError(f"{zpath.name}: manifest path model.{k}={v!r} not in the zip")
+    for section in ("HEFTE", "model"):
+        if section not in m:
+            raise PackError(f"{zpath.name}: manifest has no {section!r} section")
+        for k, v in m[section].items():
+            if not (isinstance(v, str) and v.startswith(f"{ARCHIVE_ROOT}/")):
+                continue
+            ok = any(n.startswith(v) for n in names) if v.endswith("/") else v in names
+            if not ok:
+                raise PackError(f"{zpath.name}: manifest path {section}.{k}={v!r} not in the zip")
     for rel in m["meta"]["files"]:
         if rel not in names or PurePosixPath(rel).parts[0] != ARCHIVE_ROOT:
             raise PackError(f"{zpath.name}: meta.files entry {rel!r} not in the zip")
@@ -264,6 +334,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dest", default="agentic_archives", help="where to write the zips")
     ap.add_argument("--shared-dir", default="out",
                     help="shared output folder holding step 1-2 summaries (default: out)")
+    ap.add_argument("--data-dir", default="data",
+                    help="folder holding the calendar and diagnosis files (default: data)")
     ap.add_argument("--disease", default=None,
                     help="disease keyword for every run (default: detect per run)")
     args = ap.parse_args(argv)
@@ -280,7 +352,8 @@ def main(argv=None) -> int:
     built, failed = [], []
     for rd in run_dirs:
         try:
-            zpath, missing, skipped = build_one(rd, dest, shared, args.disease)
+            zpath, missing, skipped = build_one(rd, dest, shared, Path(args.data_dir),
+                                                args.disease)
         except (PackError, KeyError, ValueError, FileNotFoundError) as e:
             failed.append(f"{rd.name}: {e}")
             print(f"[FAIL] {rd.name}: {e}")
